@@ -1,0 +1,69 @@
+stages:
+  - lint
+  - test
+  - build
+  - scan
+  - publish
+  - deploy
+
+variables:
+  IMAGE_NAME: $CI_REGISTRY_IMAGE/app
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+  FULL_IMAGE: $CI_REGISTRY_IMAGE/app:$CI_COMMIT_SHORT_SHA
+
+default:
+  tags:
+    - local
+
+lint:
+  stage: lint
+  before_script:
+    - python3 --version
+    - python3 -m venv .venv
+    - . .venv/bin/activate
+    - pip install --upgrade pip
+    - pip install ruff
+  script:
+    - . .venv/bin/activate
+    - ruff check app
+
+test:
+  stage: test
+  before_script:
+    - python3 --version
+    - python3 -m venv .venv
+    - . .venv/bin/activate
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+    - pip install pytest httpx
+    - export PYTHONPATH=$CI_PROJECT_DIR
+  script:
+    - . .venv/bin/activate
+    - export PYTHONPATH=$CI_PROJECT_DIR
+    - pytest -q
+
+build:
+  stage: build
+  script:
+    - docker build -t $FULL_IMAGE .
+
+scan:
+  stage: scan
+  script:
+    - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.58.1 image --ignore-unfixed --exit-code 1 --severity CRITICAL $FULL_IMAGE
+
+publish:
+  stage: publish
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u "$CI_REGISTRY_USER" --password-stdin
+    - docker push $FULL_IMAGE
+
+deploy:
+  stage: deploy
+  script:
+    - kubectl config current-context
+    - kubectl create secret docker-registry gitlab-registry --docker-server=$CI_REGISTRY --docker-username=$CI_REGISTRY_USER --docker-password=$CI_REGISTRY_PASSWORD --dry-run=client -o yaml | kubectl apply -f -
+    - kubectl delete deployment fastapi-secure --ignore-not-found=true
+    - kubectl apply -f k8s/
+    - kubectl set image deployment/fastapi-secure fastapi=$FULL_IMAGE
+    - kubectl rollout status deployment/fastapi-secure --timeout=180s
